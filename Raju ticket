@@ -1,0 +1,299 @@
+import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpExchange;
+import java.io.*;
+import java.net.InetSocketAddress;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+
+public class BookingServer {
+    // Simulated booked seats (persistent across requests during runtime)
+    private static final Set<Integer> bookedSeats = new HashSet<>(Arrays.asList(3, 7, 12, 15));
+    private static final int PRICE_PER_SEAT = 350;
+    private static final int TOTAL_SEATS = 20;
+
+    public static void main(String[] args) throws IOException {
+        HttpServer server = HttpServer.create(new InetSocketAddress(8080), 0);
+        server.createContext("/", BookingServer::handleRequest);
+        server.setExecutor(null);
+        System.out.println("Server started at http://localhost:8080");
+        server.start();
+    }
+
+    private static void handleRequest(HttpExchange exchange) throws IOException {
+        String method = exchange.getRequestMethod();
+        String path = exchange.getRequestURI().getPath();
+
+        if ("GET".equalsIgnoreCase(method) && "/".equals(path)) {
+            // Serve the HTML page
+            String html = generateHtml();
+            exchange.getResponseHeaders().set("Content-Type", "text/html; charset=UTF-8");
+            exchange.sendResponseHeaders(200, html.getBytes(StandardCharsets.UTF_8).length);
+            OutputStream os = exchange.getResponseBody();
+            os.write(html.getBytes(StandardCharsets.UTF_8));
+            os.close();
+        } else if ("POST".equalsIgnoreCase(method) && "/book".equals(path)) {
+            // Handle booking submission
+            String formData = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            Map<String, String> params = parseFormData(formData);
+            String response = processBooking(params);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, response.getBytes(StandardCharsets.UTF_8).length);
+            OutputStream os = exchange.getResponseBody();
+            os.write(response.getBytes(StandardCharsets.UTF_8));
+            os.close();
+        } else if ("GET".equalsIgnoreCase(method) && "/seats".equals(path)) {
+            // Return current seat status as JSON
+            String json = getSeatStatusJson();
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, json.getBytes(StandardCharsets.UTF_8).length);
+            OutputStream os = exchange.getResponseBody();
+            os.write(json.getBytes(StandardCharsets.UTF_8));
+            os.close();
+        } else {
+            String notFound = "404 Not Found";
+            exchange.sendResponseHeaders(404, notFound.length());
+            OutputStream os = exchange.getResponseBody();
+            os.write(notFound.getBytes());
+            os.close();
+        }
+    }
+
+    private static String generateHtml() {
+        return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bus Booking - Tadgur to Hyderabad</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background: #f0f4f8; }
+        header { background: #1a3c5e; color: white; padding: 1.5rem; text-align: center; }
+        header h1 { font-size: 1.8rem; }
+        .container { max-width: 700px; margin: 2rem auto; padding: 0 1rem; }
+        .card { background: white; border-radius: 10px; padding: 2rem; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        .card h2 { margin-bottom: 1.5rem; color: #1a3c5e; }
+        .form-group { margin-bottom: 1.2rem; }
+        .form-group label { display: block; font-weight: bold; margin-bottom: 0.3rem; }
+        .form-group input { width: 100%; padding: 0.7rem; border: 1px solid #ccc; border-radius: 5px; font-size: 1rem; }
+        .seat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; margin: 1rem 0; }
+        .seat { padding: 0.8rem; text-align: center; border: 2px solid #ccc; border-radius: 5px; cursor: pointer; font-weight: bold; background: #f9f9f9; user-select: none; }
+        .seat.available:hover { background: #d4edda; border-color: #28a745; }
+        .seat.selected { background: #28a745; color: white; border-color: #1e7e34; }
+        .seat.booked { background: #e74c3c; color: white; border-color: #c0392b; cursor: not-allowed; }
+        .price-summary { background: #e9f7ef; padding: 1rem; border-radius: 5px; margin: 1rem 0; }
+        .price-summary p { margin: 0.3rem 0; }
+        .btn { background: #1a3c5e; color: white; border: none; padding: 0.8rem 1.5rem; border-radius: 5px; font-size: 1rem; cursor: pointer; width: 100%; margin-top: 0.5rem; }
+        .btn:hover { background: #14304a; }
+        #message { margin-top: 1rem; padding: 1rem; border-radius: 5px; display: none; }
+        #message.success { display: block; background: #d4edda; color: #155724; }
+        #message.error { display: block; background: #f8d7da; color: #721c24; }
+        footer { text-align: center; padding: 1rem; color: #666; margin-top: 2rem; }
+        @media (max-width: 500px) { .seat-grid { grid-template-columns: repeat(3, 1fr); } }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🚌 Tadgur → Hyderabad</h1>
+        <p>Book your bus tickets online</p>
+    </header>
+    <div class="container">
+        <div class="card">
+            <h2>Book Your Seat</h2>
+            <form id="bookingForm">
+                <div class="form-group">
+                    <label for="travelDate">Travel Date</label>
+                    <input type="date" id="travelDate" required>
+                </div>
+                <div class="form-group">
+                    <label for="passengerName">Passenger Name</label>
+                    <input type="text" id="passengerName" placeholder="Full name" required>
+                </div>
+                <div class="form-group">
+                    <label for="phone">Phone Number</label>
+                    <input type="tel" id="phone" placeholder="10-digit number" pattern="[0-9]{10}" required>
+                </div>
+                <div class="form-group">
+                    <label>Select Seats (click to select/deselect)</label>
+                    <div class="seat-grid" id="seatGrid"></div>
+                    <small>Green = selected, Red = already booked</small>
+                </div>
+                <div class="price-summary">
+                    <p>Seats selected: <span id="seatCount">0</span></p>
+                    <p>Price per seat: ₹""" + PRICE_PER_SEAT + """</p>
+                    <p><strong>Total: ₹<span id="totalPrice">0</span></strong></p>
+                </div>
+                <button type="submit" class="btn">Confirm Booking</button>
+            </form>
+            <div id="message"></div>
+        </div>
+    </div>
+    <footer>
+        <p>© 2025 Tadgur-Hyderabad Bus Service | Customer Support: +91-9876543210</p>
+    </footer>
+    <script>
+        let selectedSeats = [];
+        const pricePerSeat = """ + PRICE_PER_SEAT + """;
+
+        async function loadSeats() {
+            const res = await fetch('/seats');
+            const data = await res.json();
+            const grid = document.getElementById('seatGrid');
+            grid.innerHTML = '';
+            for (let i = 1; i <= """ + TOTAL_SEATS + """; i++) {
+                const seat = document.createElement('div');
+                seat.classList.add('seat');
+                seat.dataset.seat = i;
+                seat.textContent = i;
+                if (data.booked.includes(i)) {
+                    seat.classList.add('booked');
+                } else {
+                    seat.classList.add('available');
+                    seat.addEventListener('click', () => toggleSeat(i));
+                }
+                grid.appendChild(seat);
+            }
+            // Re-apply selected state
+            document.querySelectorAll('.seat.available').forEach(s => {
+                if (selectedSeats.includes(parseInt(s.dataset.seat))) {
+                    s.classList.add('selected');
+                }
+            });
+            updateSummary();
+        }
+
+        function toggleSeat(num) {
+            const idx = selectedSeats.indexOf(num);
+            if (idx === -1) {
+                selectedSeats.push(num);
+            } else {
+                selectedSeats.splice(idx, 1);
+            }
+            document.querySelectorAll('.seat.available').forEach(s => {
+                if (selectedSeats.includes(parseInt(s.dataset.seat))) {
+                    s.classList.add('selected');
+                } else {
+                    s.classList.remove('selected');
+                }
+            });
+            updateSummary();
+        }
+
+        function updateSummary() {
+            document.getElementById('seatCount').textContent = selectedSeats.length;
+            document.getElementById('totalPrice').textContent = selectedSeats.length * pricePerSeat;
+        }
+
+        document.getElementById('bookingForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const date = document.getElementById('travelDate').value;
+            const name = document.getElementById('passengerName').value.trim();
+            const phone = document.getElementById('phone').value.trim();
+            if (!date || !name || !phone) {
+                showMessage('Please fill all fields.', 'error');
+                return;
+            }
+            if (selectedSeats.length === 0) {
+                showMessage('Please select at least one seat.', 'error');
+                return;
+            }
+            const formData = new URLSearchParams();
+            formData.append('date', date);
+            formData.append('name', name);
+            formData.append('phone', phone);
+            formData.append('seats', selectedSeats.join(','));
+            const res = await fetch('/book', { method: 'POST', body: formData });
+            const result = await res.json();
+            if (result.success) {
+                showMessage('✅ Booking confirmed! Seats: ' + selectedSeats.join(', ') + ' | Total: ₹' + (selectedSeats.length * pricePerSeat), 'success');
+                selectedSeats = [];
+                loadSeats();
+                document.getElementById('bookingForm').reset();
+            } else {
+                showMessage('❌ ' + result.message, 'error');
+            }
+        });
+
+        function showMessage(msg, type) {
+            const div = document.getElementById('message');
+            div.textContent = msg;
+            div.className = type;
+        }
+
+        // Set default date to tomorrow
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        document.getElementById('travelDate').value = tomorrow.toISOString().split('T')[0];
+
+        loadSeats();
+    </script>
+</body>
+</html>
+""";
+    }
+
+    private static String getSeatStatusJson() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{"booked":[");
+        List<Integer> sorted = new ArrayList<>(bookedSeats);
+        Collections.sort(sorted);
+        for (int i = 0; i < sorted.size(); i++) {
+            sb.append(sorted.get(i));
+            if (i < sorted.size() - 1) sb.append(",");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    private static String processBooking(Map<String, String> params) {
+        String date = params.get("date");
+        String name = params.get("name");
+        String phone = params.get("phone");
+        String seatsStr = params.get("seats");
+
+        if (date == null || name == null || phone == null || seatsStr == null) {
+            return "{"success":false,"message":"Missing fields."}";
+        }
+
+        String[] seatTokens = seatsStr.split(",");
+        List<Integer> requestedSeats = new ArrayList<>();
+        for (String s : seatTokens) {
+            try {
+                requestedSeats.add(Integer.parseInt(s.trim()));
+            } catch (NumberFormatException e) {
+                return "{"success":false,"message":"Invalid seat number."}";
+            }
+        }
+
+        // Check if any requested seat is already booked
+        List<Integer> alreadyBooked = new ArrayList<>();
+        for (int seat : requestedSeats) {
+            if (bookedSeats.contains(seat)) {
+                alreadyBooked.add(seat);
+            }
+        }
+        if (!alreadyBooked.isEmpty()) {
+            return "{"success":false,"message":"Seats already booked: " + alreadyBooked + ""}";
+        }
+
+        // Book the seats
+        bookedSeats.addAll(requestedSeats);
+        return "{"success":true,"message":"Booking confirmed."}";
+    }
+
+    private static Map<String, String> parseFormData(String formData) {
+        Map<String, String> map = new HashMap<>();
+        String[] pairs = formData.split("&");
+        for (String pair : pairs) {
+            String[] kv = pair.split("=", 2);
+            if (kv.length == 2) {
+                String key = URLDecoder.decode(kv[0], StandardCharsets.UTF_8);
+                String value = URLDecoder.decode(kv[1], StandardCharsets.UTF_8);
+                map.put(key, value);
+            }
+        }
+        return map;
+    }
+}
